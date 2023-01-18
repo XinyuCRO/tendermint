@@ -2,6 +2,9 @@ module github.com/tendermint/tendermint
 
 go 1.18
 
+require "github.com/zxy/trace-lib" v0.0.0
+replace "github.com/zxy/trace-lib" v0.0.0 => "../trace-lib"
+
 require (
 	github.com/BurntSushi/toml v1.2.0
 	github.com/ChainSafe/go-schnorrkel v0.0.0-20200405005733-88cbf1b4c40d

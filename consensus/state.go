@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	"go.opentelemetry.io/otel/attribute"
 
 	cfg "github.com/tendermint/tendermint/config"
 	cstypes "github.com/tendermint/tendermint/consensus/types"
@@ -28,6 +29,8 @@ import (
 	sm "github.com/tendermint/tendermint/state"
 	"github.com/tendermint/tendermint/types"
 	tmtime "github.com/tendermint/tendermint/types/time"
+
+	tracer "github.com/zxy/trace-lib/pkg"
 )
 
 // Consensus sentinel errors
@@ -787,6 +790,18 @@ func (cs *State) receiveRoutine(maxSteps int) {
 				cs.Logger.Error("failed writing to WAL", "err", err)
 			}
 
+			pubKey, _ := cs.privValidator.GetPubKey()
+
+
+
+			if tracer.CurrentBlockInfo.ShouldRefreshInfo(ti.Height, ti.Round) {
+				if tracer.GlobalTracer != nil {
+					tracer.GlobalTracer.Shutdown()
+				}
+				tracer.NewTracer("tendermint", pubKey.Address().String())
+				tracer.CurrentBlockInfo = &tracer.BlockInfo{Height: ti.Height, Round: ti.Round}
+			}
+
 			// if the timeout is relevant to the rs
 			// go to the next step
 			cs.handleTimeout(ti, rs)
@@ -802,12 +817,17 @@ func (cs *State) receiveRoutine(maxSteps int) {
 func (cs *State) handleMsg(mi msgInfo) {
 	cs.mtx.Lock()
 	defer cs.mtx.Unlock()
+
 	var (
 		added bool
 		err   error
 	)
 
 	msg, peerID := mi.Msg, mi.PeerID
+
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("handleMsg")
+	defer span.End()
 
 	switch msg := msg.(type) {
 	case *ProposalMessage:
@@ -891,7 +911,13 @@ func (cs *State) handleMsg(mi msgInfo) {
 }
 
 func (cs *State) handleTimeout(ti timeoutInfo, rs cstypes.RoundState) {
-	cs.Logger.Debug("received tock", "timeout", ti.Duration, "height", ti.Height, "round", ti.Round, "step", ti.Step)
+	cs.Logger.Info("received tock", "timeout", ti.Duration, "height", ti.Height, "round", ti.Round, "step", ti.Step)
+
+	span := tracer.GlobalTracer.StartSpan("handleTimeout");
+	span.SetAttributes(attribute.Int64("height", ti.Height))
+	span.SetAttributes(attribute.Int64("round", int64(ti.Round)))
+	span.SetAttributes(attribute.Int64("step", int64(ti.Step)))
+	defer span.End()
 
 	// timeouts must be for current height, round, step
 	if ti.Height != rs.Height || ti.Round < rs.Round || (ti.Round == rs.Round && ti.Step < rs.Step) {
@@ -980,6 +1006,11 @@ func (cs *State) handleTxsAvailable() {
 func (cs *State) enterNewRound(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
 
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("enterNewRound")
+	span.SetAttributes(attribute.Int64("height", height))
+	span.SetAttributes(attribute.Int64("round", int64(round)))
+
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cs.Step != cstypes.RoundStepNewHeight) {
 		logger.Debug(
 			"entering new round with invalid args",
@@ -1029,7 +1060,9 @@ func (cs *State) enterNewRound(height int64, round int32) {
 	// Wait for txs to be available in the mempool
 	// before we enterPropose in round 0. If the last block changed the app hash,
 	// we may need an empty "proof" block, and enterPropose immediately.
+	span = tracer.StartSpan("waitForTxs")
 	waitForTxs := cs.config.WaitForTxs() && round == 0 && !cs.needProofBlock(height)
+	span.End()
 	if waitForTxs {
 		if cs.config.CreateEmptyBlocksInterval > 0 {
 			cs.scheduleTimeout(cs.config.CreateEmptyBlocksInterval, height, round,
@@ -1063,6 +1096,12 @@ func (cs *State) needProofBlock(height int64) bool {
 // Enter (!CreateEmptyBlocks) : after enterNewRound(height,round), once txs are in the mempool
 func (cs *State) enterPropose(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
+
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("tendermint:enterPropose")
+	span.SetAttributes(attribute.Int64("height", height))
+	span.SetAttributes(attribute.Int64("round", int64(round)))
+	defer span.End()
 
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cstypes.RoundStepPropose <= cs.Step) {
 		logger.Debug(
@@ -1231,6 +1270,12 @@ func (cs *State) createProposalBlock() (block *types.Block, blockParts *types.Pa
 func (cs *State) enterPrevote(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
 
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("tendermint:enterPrevote")
+	span.SetAttributes(attribute.Int64("height", height))
+	span.SetAttributes(attribute.Int64("round", int64(round)))
+	defer span.End()
+
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cstypes.RoundStepPrevote <= cs.Step) {
 		logger.Debug(
 			"entering prevote step with invalid args",
@@ -1326,6 +1371,12 @@ func (cs *State) enterPrevoteWait(height int64, round int32) {
 // else, precommit nil otherwise.
 func (cs *State) enterPrecommit(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
+
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("tendermint:enterPrecommit")
+	span.SetAttributes(attribute.Int64("height", height))
+	span.SetAttributes(attribute.Int64("round", int64(round)))
+	defer span.End()
 
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cstypes.RoundStepPrecommit <= cs.Step) {
 		logger.Debug(
@@ -1448,6 +1499,9 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 // Enter: any +2/3 precommits for next round.
 func (cs *State) enterPrecommitWait(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("enterPrecommitWait")
+	defer span.End()
 
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cs.TriggeredTimeoutPrecommit) {
 		logger.Debug(
@@ -1480,6 +1534,9 @@ func (cs *State) enterPrecommitWait(height int64, round int32) {
 // Enter: +2/3 precommits for block
 func (cs *State) enterCommit(height int64, commitRound int32) {
 	logger := cs.Logger.With("height", height, "commit_round", commitRound)
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("enterCommit")
+	defer span.End()
 
 	if cs.Height != height || cstypes.RoundStepCommit <= cs.Step {
 		logger.Debug(
@@ -1543,6 +1600,9 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 // If we have the block AND +2/3 commits for it, finalize.
 func (cs *State) tryFinalizeCommit(height int64) {
 	logger := cs.Logger.With("height", height)
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("tryFinalizeCommit")
+	defer span.End()
 
 	if cs.Height != height {
 		panic(fmt.Sprintf("tryFinalizeCommit() cs.Height: %v vs height: %v", cs.Height, height))
@@ -1571,6 +1631,9 @@ func (cs *State) tryFinalizeCommit(height int64) {
 // Increment height and goto cstypes.RoundStepNewHeight
 func (cs *State) finalizeCommit(height int64) {
 	logger := cs.Logger.With("height", height)
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("finalizeCommit")
+	defer span.End()
 
 	if cs.Height != height || cs.Step != cstypes.RoundStepCommit {
 		logger.Debug(
@@ -1914,6 +1977,10 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 }
 
 func (cs *State) handleCompleteProposal(blockHeight int64) {
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("handleCompleteProposal")
+	defer span.End()
+
 	// Update Valid* if we can.
 	prevotes := cs.Votes.Prevotes(cs.Round)
 	blockID, hasTwoThirds := prevotes.TwoThirdsMajority()
@@ -1950,6 +2017,13 @@ func (cs *State) handleCompleteProposal(blockHeight int64) {
 
 // Attempt to add the vote. if its a duplicate signature, dupeout the validator
 func (cs *State) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, error) {
+
+	tracer := tracer.GlobalTracer;
+	span := tracer.StartSpan("tryAddVote")
+	span.SetAttributes(attribute.Int64("height", vote.Height))
+	span.SetAttributes(attribute.Int64("round", int64(vote.Round)))
+	defer span.End()
+
 	added, err := cs.addVote(vote, peerID)
 	if err != nil {
 		// If the vote height is off, we'll just ignore it,
@@ -1998,6 +2072,13 @@ func (cs *State) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, error) {
 }
 
 func (cs *State) addVote(vote *types.Vote, peerID p2p.ID) (added bool, err error) {
+
+	tracer := tracer.GlobalTracer
+	span := tracer.StartSpan("addVote")
+	span.SetAttributes(attribute.Int64("height", vote.Height))
+	span.SetAttributes(attribute.Int64("round", int64(vote.Round)))
+	defer span.End()
+
 	cs.Logger.Debug(
 		"adding vote",
 		"vote_height", vote.Height,
