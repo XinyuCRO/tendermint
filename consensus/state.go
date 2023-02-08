@@ -825,7 +825,7 @@ func (cs *State) handleMsg(mi msgInfo) {
 
 	msg, peerID := mi.Msg, mi.PeerID
 
-	tracer := tracer.GlobalTracer
+	tracer := tracer.GetOrCreateTracer("tendermint", "instance")
 	span := tracer.StartSpan("handleMsg")
 	defer span.End()
 
@@ -913,7 +913,7 @@ func (cs *State) handleMsg(mi msgInfo) {
 func (cs *State) handleTimeout(ti timeoutInfo, rs cstypes.RoundState) {
 	cs.Logger.Info("received tock", "timeout", ti.Duration, "height", ti.Height, "round", ti.Round, "step", ti.Step)
 
-	span := tracer.GlobalTracer.StartSpan("handleTimeout");
+	span := tracer.GetOrCreateTracer("tendermint", "instance").StartSpan("handleTimeout");
 	span.SetAttributes(attribute.Int64("height", ti.Height))
 	span.SetAttributes(attribute.Int64("round", int64(ti.Round)))
 	span.SetAttributes(attribute.Int64("step", int64(ti.Step)))
